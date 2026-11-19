@@ -60,6 +60,25 @@
   }
   #shoot:active { background: var(--accent-dark); }
   #shoot:disabled { background: var(--line); color: var(--muted); }
+  .mode-row { display: flex; gap: 8px; margin-bottom: 10px; }
+  .mode-opt { flex: 1; }
+  .mode-opt input { display: none; }
+  .mode-opt span {
+    display: block;
+    text-align: center;
+    padding: 9px 4px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: var(--panel);
+    color: var(--muted);
+    font-size: 14px;
+  }
+  .mode-opt input:checked + span {
+    border-color: var(--accent);
+    background: var(--accent);
+    color: #052e16;
+    font-weight: 700;
+  }
   #result { flex: 1; overflow-y: auto; padding-bottom: 8px; }
   .card {
     background: var(--panel);
@@ -88,6 +107,12 @@
     border-top: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
     margin-top: 10px;
+  }
+  .answer.qa {
+    font-size: 15px;
+    font-weight: 400;
+    color: var(--text);
+    line-height: 1.7;
   }
   .explain { white-space: pre-wrap; line-height: 1.6; margin-top: 10px; }
   .notice {
@@ -152,6 +177,12 @@
   <video id="video" playsinline autoplay muted></video>
 </div>
 
+<div class="mode-row">
+  <label class="mode-opt"><input type="radio" name="mode" value="auto" checked><span>自动</span></label>
+  <label class="mode-opt"><input type="radio" name="mode" value="choice"><span>选择题</span></label>
+  <label class="mode-opt"><input type="radio" name="mode" value="qa"><span>简答题</span></label>
+</div>
+
 <button id="shoot" disabled>拍照并解答</button>
 
 <div id="result"></div>
@@ -179,24 +210,51 @@ const MODEL = 'deepseek-flash';
 const MAX_SIDE = 1600;
 const STORE_KEY = 'quiz_api_key';
 const STORE_RECORDS = 'quiz_records';
+const STORE_MODE = 'quiz_mode';
 
 const SYSTEM_PROMPT = '你是严谨的试题解答助手。用户会给你一张可能包含多道试题的图片，请完成：\n'
   + '1. 按从上到下的顺序逐题识别，转写题号、题干、选项和公式（公式用 LaTeX 表示），不要遗漏或改写；\n'
-  + '2. 判断题型：只有一个正确选项为“单选”，有两个及以上正确选项为“多选”；\n'
+  + '2. 判断题型：只有一个正确选项为“单选”，有两个及以上正确选项为“多选”，没有选项、需要文字作答的为“简答”；\n'
   + '3. 先判断每道题是否拍摄完整：题干缺失或被截断、选项文字残缺或被画面边缘切掉、关键条件看不清，都算不完整；\n'
   + '4. 只对完整的题目作答，不完整的题不要猜测答案；\n'
   + '5. 只输出一个 JSON 对象，不要输出任何解释性文字或代码块标记；\n'
   + '6. 所有键和字符串值都必须用半角双引号完整包裹，字符串内部不要出现半角双引号（需要引用时改用中文引号）。';
 
-const USER_PROMPT = '请识别并解答图片中的所有题目，严格按下面的 JSON 结构输出：\n'
-  + '{"题目": [{"序号": 1, "题型": "单选或多选", "题干": "题目原文", '
+// 自动模式：同时处理选择题和简答题
+const MIXED_PROMPT = '请识别并解答图片中的所有题目，严格按下面的 JSON 结构输出：\n'
+  + '{"题目": [{"序号": 1, "题型": "单选/多选/简答", "题干": "题目原文", '
   + '"选项": {"A": "选项内容", "B": "选项内容"}, "完整": true, "缺失原因": "", '
   + '"答案": ["A"], "解析": "推理过程与结论"}]}\n'
   + '规则：\n'
   + '- 按题目在图片中的先后顺序编号，题目之间不要合并；\n'
+  + '- 选择题：题型填“单选”或“多选”，选项字段填 A/B/C/D 等内容，答案用选项字母数组表示，单选只含一个元素；\n'
+  + '- 简答题：题型填“简答”，选项填 {}，答案用文字完整作答，建议 50~100 字（不强制限制），解析可留空；\n'
+  + '- 不完整的题把“完整”设为 false，在“缺失原因”中写明原因（如“缺少题干”“选项不全”“题面被截断”），答案留空；\n'
+  + '- 判断题等题型只有两个选项属于正常情况，不要仅因选项数量少于四个判为不完整；\n'
+  + '- 若图片中没有可识别的题目，输出 {"题目": []}。';
+
+// 选择题模式：只处理单选/多选
+const CHOICE_PROMPT = '请识别并解答图片中的所有选择题，严格按下面的 JSON 结构输出：\n'
+  + '{"题目": [{"序号": 1, "题型": "单选或多选", "题干": "题目原文", '
+  + '"选项": {"A": "选项内容", "B": "选项内容"}, "完整": true, "缺失原因": "", '
+  + '"答案": ["A"], "解析": "推理过程与结论"}]}\n'
+  + '规则：\n'
+  + '- 只输出选择题，遇到简答题等非选择题直接跳过；\n'
+  + '- 按题目在图片中的先后顺序编号，题目之间不要合并；\n'
   + '- 答案用选项字母数组表示，单选只含一个元素；\n'
   + '- 不完整的题把“完整”设为 false，在“缺失原因”中写明原因（如“缺少题干”“选项不全”“题面被截断”），答案留空数组、解析留空字符串；\n'
   + '- 判断题等题型只有两个选项属于正常情况，不要仅因选项数量少于四个判为不完整；\n'
+  + '- 若图片中没有可识别的题目，输出 {"题目": []}。';
+
+// 简答题模式：只处理需要文字作答的题目
+const QA_PROMPT = '请识别并解答图片中的所有简答题，严格按下面的 JSON 结构输出：\n'
+  + '{"题目": [{"序号": 1, "题型": "简答", "题干": "题目原文", "选项": {}, '
+  + '"完整": true, "缺失原因": "", "答案": "参考答案", "解析": ""}]}\n'
+  + '规则：\n'
+  + '- 只输出简答题，遇到选择题直接跳过；\n'
+  + '- 按题目在图片中的先后顺序编号，题目之间不要合并；\n'
+  + '- “答案”用文字完整作答，讲清关键要点，建议 50~100 字，不强制限制长度；\n'
+  + '- 不完整的题把“完整”设为 false，在“缺失原因”中写明原因，答案留空字符串；\n'
   + '- 若图片中没有可识别的题目，输出 {"题目": []}。';
 
 const SHORT_HINT = '\n额外要求：每道题的“解析”控制在 60 字以内，只写结论和关键理由。';
@@ -250,6 +308,16 @@ function captureBase64() {
   canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
   const dataUrl = canvas.toDataURL('image/jpeg', 0.92);
   return dataUrl.slice(dataUrl.indexOf(',') + 1);
+}
+
+function getMode() {
+  const checked = document.querySelector('input[name="mode"]:checked');
+  return checked ? checked.value : 'auto';
+}
+
+function buildPrompt(mode, detailed) {
+  const base = mode === 'qa' ? QA_PROMPT : (mode === 'choice' ? CHOICE_PROMPT : MIXED_PROMPT);
+  return detailed ? base : base + SHORT_HINT;
 }
 
 function tryRepair(text) {
@@ -339,8 +407,9 @@ function renderResult(answered, skipped) {
 
     addField(card, '题干', cleanText(question['题干']));
 
+    const isQA = String(question['题型'] || '').includes('简答');
     const options = question['选项'];
-    if (options && typeof options === 'object') {
+    if (!isQA && options && typeof options === 'object' && Object.keys(options).length) {
       const list = document.createElement('div');
       list.className = 'options';
       for (const [name, value] of Object.entries(options)) {
@@ -355,14 +424,17 @@ function renderResult(answered, skipped) {
       ? question['答案'].join('、')
       : cleanText(question['答案']);
     const answerEl = document.createElement('div');
-    answerEl.className = 'answer';
-    answerEl.textContent = '答案：' + (answer || '（无）');
+    answerEl.className = isQA ? 'answer qa' : 'answer';
+    answerEl.textContent = (isQA ? '参考答案：' : '答案：') + (answer || '（无）');
     card.appendChild(answerEl);
 
-    const explainEl = document.createElement('div');
-    explainEl.className = 'explain';
-    explainEl.textContent = '解析：' + (cleanText(question['解析']) || '（无）');
-    card.appendChild(explainEl);
+    const explain = cleanText(question['解析']);
+    if (explain) {
+      const explainEl = document.createElement('div');
+      explainEl.className = 'explain';
+      explainEl.textContent = '解析：' + explain;
+      card.appendChild(explainEl);
+    }
 
     resultEl.appendChild(card);
   });
@@ -376,7 +448,7 @@ function renderResult(answered, skipped) {
   }
 }
 
-async function solve(base64, apiKey, detailed, onStream) {
+async function solve(base64, apiKey, prompt, detailed, onStream) {
   const payload = {
     model: MODEL,
     messages: [
@@ -385,7 +457,7 @@ async function solve(base64, apiKey, detailed, onStream) {
         role: 'user',
         content: [
           { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,' + base64, detail: 'high' } },
-          { type: 'text', text: detailed ? USER_PROMPT : USER_PROMPT + SHORT_HINT },
+          { type: 'text', text: prompt },
         ],
       },
     ],
@@ -473,7 +545,10 @@ async function shoot() {
 
   try {
     const base64 = captureBase64();
-    const { content, elapsed } = await solve(base64, apiKey, detailBox.checked, text => {
+    const mode = getMode();
+    const detailed = detailBox.checked;
+    const prompt = buildPrompt(mode, detailed);
+    const { content, elapsed } = await solve(base64, apiKey, prompt, detailed, text => {
       streamEl.textContent = cleanText(text);
     });
 
@@ -547,10 +622,18 @@ function loadState() {
     keyInput.value = localStorage.getItem(STORE_KEY) || '';
     const saved = JSON.parse(localStorage.getItem(STORE_RECORDS) || '[]');
     if (Array.isArray(saved)) records = saved;
+    const savedMode = localStorage.getItem(STORE_MODE);
+    if (savedMode) {
+      const input = document.querySelector('input[name="mode"][value="' + savedMode + '"]');
+      if (input) input.checked = true;
+    }
   } catch (e) { /* 首次使用无数据 */ }
 }
 
 keyInput.addEventListener('change', () => remember(STORE_KEY, keyInput.value.trim()));
+document.querySelectorAll('input[name="mode"]').forEach(input => {
+  input.addEventListener('change', () => remember(STORE_MODE, input.value));
+});
 shootBtn.addEventListener('click', shoot);
 document.getElementById('export').addEventListener('click', exportRecords);
 document.getElementById('clear').addEventListener('click', () => {
