@@ -1,0 +1,19 @@
+{
+  "name": "试题扫描解题",
+  "short_name": "试题解题",
+  "description": "拍照识别试题并解答单选、多选",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#0f172a",
+  "theme_color": "#0f172a",
+  "icons": [
+    {
+      "src": "./icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}
